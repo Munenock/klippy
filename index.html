@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cloud clipboard · sync everywhere</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
+  body { background:#f2f5f9; display:flex; align-items:center; justify-content:center; min-height:100vh; padding:1.5rem; }
+  .card { background:#fff; border-radius:2rem; box-shadow:0 25px 40px -12px rgba(0,20,30,.25); width:100%; max-width:720px; padding:2rem; }
+  .header { display:flex; align-items:center; justify-content:space-between; margin-bottom:1.2rem; flex-wrap:wrap; gap:.5rem; }
+  .header h1 { font-size:1.6rem; font-weight:600; color:#1e2b3c; display:flex; align-items:center; gap:.5rem; }
+  .badge { background:#e9edf2; padding:.4rem 1rem; border-radius:100px; font-size:.75rem; font-weight:500; color:#2c3e50; border:1px solid #d0dae5; }
+  .badge.online { background:#e0f5e9; border-color:#b8e6c9; color:#1e6b3a; }
+  .badge.offline { background:#ffe9e9; border-color:#f5c6c6; color:#a13e3e; }
+  .textarea-wrapper { border-radius:1.2rem; background:#f9fcff; border:1px solid #d9e2ec; margin-bottom:1.2rem; transition:all .15s; }
+  .textarea-wrapper:focus-within { border-color:#6c8db0; box-shadow:0 0 0 4px rgba(108,141,176,.15); background:#fff; }
+  textarea { width:100%; min-height:260px; padding:1.4rem; font-size:1rem; line-height:1.6; border:none; background:transparent; resize:vertical; border-radius:1.2rem; outline:none; color:#1a2b3c; font-family:'SF Mono','Menlo','Cascadia Code','Roboto Mono',monospace; }
+  textarea::placeholder { color:#94a9be; font-style:italic; font-family:system-ui,sans-serif; }
+  .toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:.75rem; }
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:.4rem; background:#fff; border:1px solid #cbd8e8; padding:.7rem 1.3rem; border-radius:60px; font-size:.9rem; font-weight:500; color:#1e2f40; cursor:pointer; transition:all .15s; }
+  .btn:hover:not(:disabled) { background:#f4f9ff; border-color:#9bb1ca; transform:translateY(-1px); }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-primary { background:#1e2f40; border-color:#1e2f40; color:#fff; }
+  .btn-primary:hover:not(:disabled) { background:#2a4055; }
+  .btn-ghost { background:transparent; border-color:transparent; color:#4b637a; }
+  .btn-ghost:hover:not(:disabled) { background:#eef3f9; }
+  .status { margin-left:auto; font-size:.8rem; color:#4e6b8a; padding:.4rem 1rem; border-radius:60px; background:#e9f2fa; border:1px solid #cfddee; min-height:2rem; display:flex; align-items:center; transition:all .2s; }
+  .status.error { background:#ffe9e9; border-color:#f5c6c6; color:#a13e3e; }
+  .status.success { background:#e0f5e9; border-color:#b8e6c9; color:#1e6b3a; }
+  .status:empty { display:none; }
+  .meta { display:flex; justify-content:space-between; align-items:center; margin-top:1rem; font-size:.75rem; color:#7f96ad; flex-wrap:wrap; gap:.5rem; }
+  .counter { background:#eef3f9; padding:.3rem .8rem; border-radius:30px; border:1px solid #d0ddee; }
+  @media (max-width:560px) {
+    .card { padding:1.4rem; border-radius:1.5rem; }
+    .btn { padding:.6rem 1rem; font-size:.85rem; }
+    .status { margin-left:0; width:100%; justify-content:center; }
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="header">
+    <h1>☁️ cloud clipboard</h1>
+    <div id="connectionBadge" class="badge offline">offline</div>
+  </div>
+
+  <div class="textarea-wrapper">
+    <textarea id="clipboardTextarea" placeholder="paste or write anything here…&#10;&#10;it syncs to the cloud automatically, so you can open this page on any device." spellcheck="false"></textarea>
+  </div>
+
+  <div class="toolbar">
+    <button class="btn" id="copyBtn">📋 Copy</button>
+    <button class="btn" id="pasteBtn">📥 Paste</button>
+    <button class="btn" id="syncBtn">🔄 Sync</button>
+    <button class="btn btn-ghost" id="clearBtn">🗑️ Clear</button>
+    <div id="status" class="status"></div>
+  </div>
+
+  <div class="meta">
+    <span>🔒 synced privately via your own JSONBin</span>
+    <span class="counter" id="charCounter">0 chars</span>
+  </div>
+</div>
+
+<script>
+(function() {
+  // ─── HARDCODED CREDENTIALS ───
+  const API_KEY = '$2a$10$O84KDAkN3TCfc3oXOVXIkuPa7H1dlnR0TDdHjwp3Kseh6/m08QR3e';
+  const BIN_ID  = '6acb5394ac6210605a275a3a';
+  const API_BASE = 'https://api.jsonbin.io/v3/b';
+
+  const textarea = document.getElementById('clipboardTextarea');
+  const copyBtn = document.getElementById('copyBtn');
+  const pasteBtn = document.getElementById('pasteBtn');
+  const syncBtn = document.getElementById('syncBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const statusEl = document.getElementById('status');
+  const charCounter = document.getElementById('charCounter');
+  const connectionBadge = document.getElementById('connectionBadge');
+
+  let statusTimeout = null;
+  let saveTimeout = null;
+  let isSyncing = false;
+  let lastKnownRemote = null;
+
+  function setStatus(msg, type = '') {
+    if (statusTimeout) clearTimeout(statusTimeout);
+    statusEl.textContent = msg;
+    statusEl.className = 'status' + (type ? ' ' + type : '');
+    if (msg) {
+      statusTimeout = setTimeout(() => {
+        statusEl.textContent = '';
+        statusEl.className = 'status';
+      }, 3000);
+    }
+  }
+
+  function setConnection(online) {
+    connectionBadge.textContent = online ? 'online · synced' : 'offline';
+    connectionBadge.className = 'badge ' + (online ? 'online' : 'offline');
+  }
+
+  function updateCounter() {
+    const len = textarea.value.length;
+    charCounter.textContent = len + (len === 1 ? ' char' : ' chars');
+  }
+
+  // Load from cloud
+  async function loadFromCloud(silent = false) {
+    try {
+      if (!silent) setStatus('loading…');
+      const res = await fetch(API_BASE + '/' + BIN_ID + '/latest', {
+        headers: { 'X-Master-Key': API_KEY }
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const text = data.record?.text ?? '';
+      lastKnownRemote = text;
+      // Only overwrite if user hasn't typed something different locally
+      if (textarea.value !== text && !saveTimeout) {
+        textarea.value = text;
+        updateCounter();
+      }
+      setConnection(true);
+      if (!silent) setStatus('✓ loaded from cloud', 'success');
+    } catch (e) {
+      setConnection(false);
+      if (!silent) setStatus('load failed: ' + e.message, 'error');
+    }
+  }
+
+  // Save to cloud
+  async function saveToCloud(silent = false) {
+    if (isSyncing) return;
+    isSyncing = true;
+    try {
+      if (!silent) setStatus('saving…');
+      const res = await fetch(API_BASE + '/' + BIN_ID, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Master-Key': API_KEY
+        },
+        body: JSON.stringify({ text: textarea.value })
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      lastKnownRemote = textarea.value;
+      setConnection(true);
+      if (!silent) setStatus('✓ saved to cloud', 'success');
+    } catch (e) {
+      setConnection(false);
+      if (!silent) setStatus('save failed: ' + e.message, 'error');
+    } finally {
+      isSyncing = false;
+    }
+  }
+
+  // Debounced auto-save
+  function scheduleSave() {
+    if (saveTimeout) clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(() => {
+      saveTimeout = null;
+      saveToCloud(true);
+    }, 1200);
+  }
+
+  // Copy
+  async function copyToClipboard() {
+    if (!textarea.value) { setStatus('nothing to copy', 'error'); return; }
+    try {
+      await navigator.clipboard.writeText(textarea.value);
+      setStatus('✓ copied', 'success');
+    } catch {
+      textarea.select();
+      document.execCommand('copy');
+      window.getSelection()?.removeAllRanges();
+      setStatus('✓ copied (fallback)', 'success');
+    }
+  }
+
+  // Paste
+  async function pasteFromClipboard() {
+    try {
+      if (!navigator.clipboard?.readText) { setStatus('paste not supported', 'error'); return; }
+      const text = await navigator.clipboard.readText();
+      if (!text) { setStatus('clipboard empty', 'error'); return; }
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      textarea.value = textarea.value.substring(0, start) + text + textarea.value.substring(end);
+      textarea.setSelectionRange(start + text.length, start + text.length);
+      textarea.focus();
+      updateCounter();
+      scheduleSave();
+      setStatus('✓ pasted', 'success');
+    } catch (e) {
+      setStatus('paste denied — use Ctrl+V', 'error');
+    }
+  }
+
+  // Clear
+  function clearTextarea() {
+    if (!textarea.value) { setStatus('already empty', 'error'); return; }
+    textarea.value = '';
+    updateCounter();
+    scheduleSave();
+    textarea.focus();
+    setStatus('cleared', 'success');
+  }
+
+  // Event listeners
+  textarea.addEventListener('input', () => { updateCounter(); scheduleSave(); });
+  copyBtn.addEventListener('click', copyToClipboard);
+  pasteBtn.addEventListener('click', pasteFromClipboard);
+  syncBtn.addEventListener('click', () => saveToCloud(false));
+  clearBtn.addEventListener('click', clearTextarea);
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'C') { e.preventDefault(); copyToClipboard(); }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'V') { e.preventDefault(); pasteFromClipboard(); }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'X') { e.preventDefault(); clearTextarea(); }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'S') { e.preventDefault(); saveToCloud(false); }
+  });
+
+  // Initial load + poll every 8s for changes from other devices
+  updateCounter();
+  loadFromCloud();
+  setInterval(() => {
+    if (!document.hidden && !saveTimeout) loadFromCloud(true);
+  }, 8000);
+
+  // Save when tab becomes hidden (mobile switch)
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && textarea.value !== lastKnownRemote) {
+      saveToCloud(true);
+    }
+  });
+})();
+</script>
+</body>
+</html>
